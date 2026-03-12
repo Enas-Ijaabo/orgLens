@@ -8,6 +8,7 @@ import (
 	"os"
 
 	"github.com/enas/orglens/internal/nova"
+	"github.com/enas/orglens/internal/reader"
 )
 
 func main() {
@@ -18,13 +19,21 @@ func main() {
 		log.Fatalf("nova init: %v", err)
 	}
 
-	facts, err := novaClient.ExtractFacts(ctx, "AuthService handles authentication using JWT tokens.", "test")
+	datasetDir := os.Getenv("DATASET_DIR")
+	if datasetDir == "" {
+		datasetDir = "../dataset"
+	}
+
+	chunks, err := reader.ReadDataset(datasetDir)
 	if err != nil {
-		log.Fatalf("extract facts: %v", err)
+		log.Fatalf("read dataset: %v", err)
 	}
-	for _, f := range facts {
-		log.Printf("Fact: {Subject:%s Relation:%s Object:%s}", f.Subject, f.Relation, f.Object)
+	log.Printf("Read %d chunks from dataset", len(chunks))
+	for i, c := range chunks {
+		log.Printf("Chunk %d [%s]: %.80s...", i+1, c.Source, c.Text)
 	}
+
+	_ = novaClient
 
 	port := os.Getenv("PORT")
 	if port == "" {
