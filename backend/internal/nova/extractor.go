@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/enas/orglens/internal/pipeline"
@@ -63,7 +64,8 @@ func (c *Client) ExtractFacts(ctx context.Context, text, source string) ([]pipel
 
 	raw = extractJSON(raw)
 	if raw == "" {
-		return nil, fmt.Errorf("no JSON array found in model response")
+		log.Printf("no JSON array found in model response\nraw: %s", raw)
+		return []pipeline.Fact{}, nil
 	}
 
 	var triples []struct {
