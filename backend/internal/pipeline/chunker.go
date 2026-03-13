@@ -40,13 +40,13 @@ func ChunkFile(path string) ([]Chunk, error) {
 }
 
 func chunkDocs(content, source string) []Chunk {
-	var chunks []Chunk
+	var raw []Chunk
 	lineNum := 1
 	for _, para := range strings.Split(content, "\n\n") {
 		paraLines := strings.Count(para, "\n") + 1
 		trimmed := strings.TrimSpace(para)
 		if trimmed != "" {
-			chunks = append(chunks, Chunk{
+			raw = append(raw, Chunk{
 				Content:   trimmed,
 				Source:    source,
 				StartLine: lineNum,
@@ -54,6 +54,20 @@ func chunkDocs(content, source string) []Chunk {
 			})
 		}
 		lineNum += paraLines + 1 // +1 for the blank separator line
+	}
+
+	// Merge title-only chunks (single line) with the following chunk.
+	var chunks []Chunk
+	for i := 0; i < len(raw); i++ {
+		if !strings.Contains(raw[i].Content, "\n") && i+1 < len(raw) {
+			merged := raw[i]
+			merged.Content = raw[i].Content + "\n\n" + raw[i+1].Content
+			merged.EndLine = raw[i+1].EndLine
+			chunks = append(chunks, merged)
+			i++ // skip next
+		} else {
+			chunks = append(chunks, raw[i])
+		}
 	}
 	return chunks
 }

@@ -9,7 +9,6 @@ import (
 
 	"github.com/enas/orglens/internal/nova"
 	"github.com/enas/orglens/internal/pipeline"
-	"github.com/enas/orglens/internal/reader"
 )
 
 func main() {
@@ -25,20 +24,9 @@ func main() {
 		datasetDir = "../dataset"
 	}
 
-	chunks, err := reader.ReadDataset(datasetDir)
+	allFacts, err := pipeline.Run(ctx, datasetDir, novaClient.ExtractFacts)
 	if err != nil {
-		log.Fatalf("read dataset: %v", err)
-	}
-	log.Printf("Read %d chunks from dataset", len(chunks))
-
-	var allFacts []pipeline.Fact
-	for _, c := range chunks {
-		facts, err := novaClient.ExtractFacts(ctx, c.Text, c.Source)
-		if err != nil {
-			log.Printf("extract [%s]: %v", c.Source, err)
-			continue
-		}
-		allFacts = append(allFacts, facts...)
+		log.Fatalf("pipeline: %v", err)
 	}
 
 	log.Printf("Extracted %d facts total", len(allFacts))
