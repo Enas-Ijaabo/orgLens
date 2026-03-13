@@ -9,17 +9,27 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/enas/orglens/internal/pipeline"
 	"github.com/google/uuid"
 )
 
 const collectionName = "orglens_knowledge"
+const metaCollectionName = "orglens_meta"
 
 type Client struct {
-	base         string
-	collectionID string
-	httpClient   *http.Client
+	base             string
+	collectionID     string
+	metaCollectionID string
+	httpClient       *http.Client
+}
+
+// FileMeta holds per-file ingestion state stored in orglens_meta.
+type FileMeta struct {
+	File       string    `json:"file"`
+	IngestedAt time.Time `json:"ingested_at"`
+	FactsCount int       `json:"facts_count"`
 }
 
 func NewClient() *Client {
@@ -225,6 +235,109 @@ func (c *Client) Reset(ctx context.Context) error {
 	resp.Body.Close()
 	// 404 is fine — collection didn't exist
 	return c.EnsureCollection(ctx)
+}
+
+// EnsureMetaCollection creates orglens_meta if it does not exist, then fetches its UUID.
+func (c *Client) EnsureMetaCollection(ctx context.Context) error {
+	body, _ := json.Marshal(map[string]any{"name": metaCollectionName})
+	resp, err := c.post(ctx, "/api/v1/collections", body)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	ok := resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusConflict
+	if !ok && resp.StatusCode == http.StatusInternalServerError {
+		ok = strings.Contains(string(b), "already exists")
+	}
+	if !ok {
+		return fmt.Errorf("ensure meta collection: unexpected status %d", resp.StatusCode)
+	}
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet,
+		c.base+"/api/v1/collections/"+metaCollectionName, nil)
+	res, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("fetch meta collection id: %w", err)
+	}
+	defer res.Body.Close()
+	var col struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&col); err != nil || col.ID == "" {
+		return fmt.Errorf("fetch meta collection id: bad response")
+	}
+	c.metaCollectionID = col.ID
+	return nil
+}
+
+func (c *Client) metaColPath(suffix string) string {
+	return "/api/v1/collections/" + c.metaCollectionID + suffix
+}
+
+// WriteFileMeta upserts a per-file ingestion record into orglens_meta.
+func (c *Client) WriteFileMeta(ctx context.Context, file string, ingestedAt time.Time, factsCount int) error {
+	body, _ := json.Marshal(map[string]any{
+		"ids":        []string{file},
+		"documents":  []string{file},
+		"embeddings": [][]float64{{0.0}},
+		"metadatas":  []map[string]any{{"ingested_at": ingestedAt.Format(time.RFC3339), "facts_count": factsCount}},
+	})
+	resp, err := c.post(ctx, c.metaColPath("/upsert"), body)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("write file meta: status %d: %s", resp.StatusCode, string(b))
+	}
+	return nil
+}
+
+// GetAllMeta returns all per-file ingestion records from orglens_meta.
+func (c *Client) GetAllMeta(ctx context.Context) ([]FileMeta, error) {
+	body, _ := json.Marshal(map[string]any{
+		"include": []string{"documents", "metadatas"},
+	})
+	resp, err := c.post(ctx, c.metaColPath("/get"), body)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var result struct {
+		IDs       []string         `json:"ids"`
+		Metadatas []map[string]any `json:"metadatas"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("getallmeta decode: %w", err)
+	}
+	metas := make([]FileMeta, len(result.IDs))
+	for i, id := range result.IDs {
+		metas[i].File = id
+		if i < len(result.Metadatas) {
+			m := result.Metadatas[i]
+			if v, ok := m["ingested_at"].(string); ok {
+				t, _ := time.Parse(time.RFC3339, v)
+				metas[i].IngestedAt = t
+			}
+			if v, ok := m["facts_count"].(float64); ok {
+				metas[i].FactsCount = int(v)
+			}
+		}
+	}
+	return metas, nil
+}
+
+// ResetMeta deletes and recreates the orglens_meta collection.
+func (c *Client) ResetMeta(ctx context.Context) error {
+	req, _ := http.NewRequestWithContext(ctx, http.MethodDelete,
+		c.base+"/api/v1/collections/"+metaCollectionName, nil)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("reset meta delete: %w", err)
+	}
+	resp.Body.Close()
+	return c.EnsureMetaCollection(ctx)
 }
 
 func (c *Client) post(ctx context.Context, path string, body []byte) (*http.Response, error) {

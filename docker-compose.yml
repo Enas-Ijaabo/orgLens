@@ -3,6 +3,8 @@ services:
     image: chromadb/chroma:0.4.24
     ports:
       - "8001:8000"
+    volumes:
+      - chroma_data:/chroma/chroma
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/heartbeat')"]
       interval: 5s
@@ -30,5 +32,9 @@ services:
       - "3000:3000"
     environment:
       - NEXT_PUBLIC_API_URL=http://localhost:8080
+      - INTERNAL_API_URL=http://backend:8080
     depends_on:
       - backend
+
+volumes:
+  chroma_data:

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 )
 
 var nonAlphanumRe = regexp.MustCompile(`[^a-z0-9\s]`)
@@ -35,44 +36,68 @@ var (
 // ExtractFunc is called per chunk to extract facts from text.
 type ExtractFunc func(ctx context.Context, text, source string) ([]Fact, error)
 
-// Run walks datasetDir, chunks every file, and extracts facts from each chunk.
-// Deduplicates facts by exact text across the whole run.
-func Run(ctx context.Context, datasetDir string, extract ExtractFunc) ([]Fact, error) {
+type fileResult struct {
+	source string
+	facts  []Fact
+}
+
+// Run walks datasetDir, extracts facts from all files in parallel (up to 4 concurrent),
+// deduplicates, and calls onFileDone after each file completes (optional).
+func Run(ctx context.Context, datasetDir string, extract ExtractFunc, onFileDone func(string, int)) ([]Fact, error) {
 	files, err := WalkDataset(datasetDir)
 	if err != nil {
 		return nil, err
 	}
 
+	results := make([]fileResult, len(files))
+	sem := make(chan struct{}, 10)
+	var wg sync.WaitGroup
+
+	for i, path := range files {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(idx int, absPath string) {
+			defer func() { <-sem; wg.Done() }()
+
+			relSource, _ := filepath.Rel(datasetDir, absPath)
+
+			chunks, err := ChunkFile(absPath)
+			if err != nil {
+				log.Printf("chunk [%s]: %v", relSource, err)
+				return
+			}
+			for j := range chunks {
+				chunks[j].Source = relSource
+			}
+
+			log.Printf("Reading file: %s — %d chunks", relSource, len(chunks))
+
+			var fileFacts []Fact
+			for _, chunk := range chunks {
+				facts, err := extract(ctx, chunk.Content, chunk.Source)
+				if err != nil {
+					log.Printf("extract [%s]: %v", relSource, err)
+					continue
+				}
+				fileFacts = append(fileFacts, facts...)
+			}
+
+			log.Printf("Extracted %d statements from %s", len(fileFacts), relSource)
+			results[idx] = fileResult{source: relSource, facts: fileFacts}
+
+			if onFileDone != nil {
+				onFileDone(relSource, len(fileFacts))
+			}
+		}(i, path)
+	}
+
+	wg.Wait()
+
+	// Deduplicate across all files
 	seen := map[string]bool{}
 	var allFacts []Fact
-
-	for _, path := range files {
-		relSource, _ := filepath.Rel(datasetDir, path)
-
-		chunks, err := ChunkFile(path)
-		if err != nil {
-			log.Printf("chunk [%s]: %v", relSource, err)
-			continue
-		}
-		for i := range chunks {
-			chunks[i].Source = relSource
-		}
-
-		log.Printf("Reading file: %s — %d chunks", relSource, len(chunks))
-
-		var fileFacts []Fact
-		for _, chunk := range chunks {
-			facts, err := extract(ctx, chunk.Content, chunk.Source)
-			if err != nil {
-				log.Printf("extract [%s]: %v", relSource, err)
-				continue
-			}
-			fileFacts = append(fileFacts, facts...)
-		}
-
-		log.Printf("Extracted %d statements", len(fileFacts))
-
-		for _, f := range fileFacts {
+	for _, r := range results {
+		for _, f := range r.facts {
 			key := normalizeText(f.Text)
 			if !seen[key] {
 				seen[key] = true

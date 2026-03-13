@@ -29,7 +29,7 @@ func (c *Client) Embed(ctx context.Context, text string) ([]float64, error) {
 
 	var out *bedrockruntime.InvokeModelOutput
 	var err error
-	for attempt, delay := 0, time.Second; attempt < 5; attempt++ {
+	for attempt, delay := 0, 3*time.Second; attempt < 6; attempt++ {
 		out, err = c.bedrock.InvokeModel(ctx, &bedrockruntime.InvokeModelInput{
 			ModelId:     aws.String(embedModelID),
 			ContentType: aws.String("application/json"),

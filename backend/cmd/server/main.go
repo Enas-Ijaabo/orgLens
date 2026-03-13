@@ -3,9 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
+	"time"
 
 	"github.com/enas/orglens/internal/nova"
 	"github.com/enas/orglens/internal/pipeline"
@@ -30,6 +33,9 @@ func main() {
 	if err := chromaClient.EnsureCollection(ctx); err != nil {
 		log.Fatalf("chroma init: %v", err)
 	}
+	if err := chromaClient.EnsureMetaCollection(ctx); err != nil {
+		log.Fatalf("chroma meta init: %v", err)
+	}
 
 	datasetDir := os.Getenv("DATASET_DIR")
 	if datasetDir == "" {
@@ -44,6 +50,7 @@ func main() {
 
 	http.HandleFunc("/api/health", cors(srv.health))
 	http.HandleFunc("/api/ingest", cors(srv.ingest))
+	http.HandleFunc("/api/ingest/status", cors(srv.ingestStatus))
 	http.HandleFunc("/api/facts", cors(srv.facts))
 	http.HandleFunc("/api/query", cors(srv.query))
 
@@ -82,35 +89,59 @@ func (s *server) ingest(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 
-	// 1. Extract facts from dataset
-	facts, err := pipeline.Run(ctx, s.datasetDir, s.nova.ExtractFacts)
+	// Clear previous meta so live status starts fresh
+	if err := s.chroma.ResetMeta(ctx); err != nil {
+		log.Printf("chroma meta reset: %v", err)
+		http.Error(w, "meta reset failed", http.StatusInternalServerError)
+		return
+	}
+
+	// Extract facts; write per-file meta as each file completes
+	onFileDone := func(file string, count int) {
+		if err := s.chroma.WriteFileMeta(ctx, file, time.Now().UTC(), count); err != nil {
+			log.Printf("write file meta [%s]: %v", file, err)
+		}
+	}
+	facts, err := pipeline.Run(ctx, s.datasetDir, s.nova.ExtractFacts, onFileDone)
 	if err != nil {
 		log.Printf("pipeline error: %v", err)
 		http.Error(w, "pipeline failed", http.StatusInternalServerError)
 		return
 	}
 
-	// 2. Fresh ingest — reset collection
+	// Fresh knowledge collection
 	if err := s.chroma.Reset(ctx); err != nil {
 		log.Printf("chroma reset: %v", err)
 		http.Error(w, "store reset failed", http.StatusInternalServerError)
 		return
 	}
 
-	// 3. Embed each fact
+	// Embed all facts in parallel (bounded to 3 concurrent to stay under Bedrock rate limits)
 	log.Printf("Embedding %d facts...", len(facts))
 	embeddings := make([][]float64, len(facts))
+	sem := make(chan struct{}, 3)
+	errc := make(chan error, len(facts))
 	for i, f := range facts {
-		emb, err := s.nova.Embed(ctx, f.Text)
-		if err != nil {
-			log.Printf("embed [%d]: %v", i, err)
+		sem <- struct{}{}
+		go func(idx int, text string) {
+			defer func() { <-sem }()
+			emb, err := s.nova.Embed(ctx, text)
+			if err != nil {
+				errc <- fmt.Errorf("embed [%d]: %w", idx, err)
+				return
+			}
+			embeddings[idx] = emb
+			errc <- nil
+		}(i, f.Text)
+	}
+	for range facts {
+		if err := <-errc; err != nil {
+			log.Printf("%v", err)
 			http.Error(w, "embedding failed", http.StatusInternalServerError)
 			return
 		}
-		embeddings[i] = emb
 	}
 
-	// 4. Store in ChromaDB
 	if err := s.chroma.Add(ctx, facts, embeddings); err != nil {
 		log.Printf("chroma add: %v", err)
 		http.Error(w, "store failed", http.StatusInternalServerError)
@@ -120,6 +151,54 @@ func (s *server) ingest(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Stored %d facts in ChromaDB", len(facts))
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]int{"facts_count": len(facts)})
+}
+
+func (s *server) ingestStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	ctx := r.Context()
+
+	files, err := pipeline.WalkDataset(s.datasetDir)
+	if err != nil {
+		http.Error(w, "walk failed", http.StatusInternalServerError)
+		return
+	}
+
+	metas, err := s.chroma.GetAllMeta(ctx)
+	if err != nil {
+		log.Printf("getallmeta: %v", err)
+		http.Error(w, "meta read failed", http.StatusInternalServerError)
+		return
+	}
+
+	metaMap := make(map[string]store.FileMeta, len(metas))
+	for _, m := range metas {
+		metaMap[m.File] = m
+	}
+
+	type fileStatus struct {
+		File       string     `json:"file"`
+		Ingested   bool       `json:"ingested"`
+		IngestedAt *time.Time `json:"ingested_at,omitempty"`
+		FactsCount *int       `json:"facts_count,omitempty"`
+	}
+
+	statuses := make([]fileStatus, len(files))
+	for i, path := range files {
+		rel, _ := filepath.Rel(s.datasetDir, path)
+		if m, ok := metaMap[rel]; ok {
+			t := m.IngestedAt
+			n := m.FactsCount
+			statuses[i] = fileStatus{File: rel, Ingested: true, IngestedAt: &t, FactsCount: &n}
+		} else {
+			statuses[i] = fileStatus{File: rel}
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(statuses)
 }
 
 func (s *server) facts(w http.ResponseWriter, r *http.Request) {
@@ -155,7 +234,6 @@ func (s *server) query(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1. Embed the question
 	emb, err := s.nova.Embed(ctx, req.Q)
 	if err != nil {
 		log.Printf("query embed: %v", err)
@@ -163,7 +241,6 @@ func (s *server) query(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2. Vector search — top 10 facts
 	facts, err := s.chroma.Query(ctx, emb, 10)
 	if err != nil {
 		log.Printf("query search: %v", err)
@@ -171,7 +248,6 @@ func (s *server) query(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 3. Nova synthesis
 	answer, err := s.nova.Synthesize(ctx, req.Q, facts)
 	if err != nil {
 		log.Printf("query synthesize: %v", err)
