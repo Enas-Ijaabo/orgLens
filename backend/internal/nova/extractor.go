@@ -19,40 +19,26 @@ var validTypes = map[string]bool{
 	"decision":      true,
 }
 
-const extractionPrompt = `You are an expert software engineer analyzing source code and documentation.
+const extractionPrompt = `You are an expert software engineer. Extract factual knowledge statements that are EXPLICITLY present in the text below.
 
-Your job is to extract hidden knowledge statements — business rules, domain constraints,
-system behaviors, architectural decisions — that are encoded in the text below.
+Extract only:
+- Business rules (e.g. account limits, approval thresholds)
+- Domain constraints (e.g. numeric limits, time windows, size caps)
+- System behaviors (e.g. what happens on timeout, how retries work)
+- Architectural decisions (e.g. which service owns what, how traffic flows)
+- Data rules (e.g. where data is stored, retention policies)
 
-Focus on knowledge that would be hard to discover without reading the code carefully:
-- Business rules: "Free tier users are limited to 3 projects"
-- Domain constraints: "Orders require a minimum charge of $10"
-- System behaviors: "JWT tokens expire after 24 hours"
-- Architectural decisions: "All external traffic routes through the API Gateway"
-- Data rules: "Revoked tokens are stored in the revoked_tokens table"
-- Retry/failure policies: "Payments are retried up to 3 times before failing"
+Strict rules:
+- Only extract facts that are EXPLICITLY stated in the text — do not infer or invent
+- Every number, name, and condition must come directly from the text
+- Skip generic boilerplate, imports, variable declarations with no business meaning
+- If the text contains no meaningful facts, return []
+- Do not use prior knowledge or information from other files. Only use the text provided.
 
-Rules:
-- Write each statement as a clear, complete English sentence
-- Be specific — include numbers, names, and conditions when present
-- Do not invent facts that are not explicitly in the text
-- Skip trivial facts (imports, variable names, boilerplate)
-
-Output format:
-[
-  {
-    "fact": "JWT tokens expire after 24 hours",
-    "type": "business_rule"
-  },
-  {
-    "fact": "PaymentService uses Stripe for payment processing",
-    "type": "architecture"
-  }
-]
-
+Output: a JSON array of objects with "fact" (complete English sentence) and "type".
 Valid types: business_rule, architecture, data_rule, behavior, constraint, decision
 
-Now extract from this text:
+Text to extract from:
 {text}
 
 Return ONLY a valid JSON array. No explanation. No markdown.`

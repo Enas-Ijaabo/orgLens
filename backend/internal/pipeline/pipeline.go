@@ -5,8 +5,19 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
+
+var nonAlphanumRe = regexp.MustCompile(`[^a-z0-9\s]`)
+
+// normalizeText lowercases, strips punctuation, and collapses whitespace.
+// Used as a dedup key so near-identical facts with minor wording differences are collapsed.
+func normalizeText(s string) string {
+	s = strings.ToLower(s)
+	s = nonAlphanumRe.ReplaceAllString(s, "")
+	return strings.Join(strings.Fields(s), " ")
+}
 
 var (
 	allowedExts = map[string]bool{
@@ -62,14 +73,15 @@ func Run(ctx context.Context, datasetDir string, extract ExtractFunc) ([]Fact, e
 		log.Printf("Extracted %d statements", len(fileFacts))
 
 		for _, f := range fileFacts {
-			if !seen[f.Text] {
-				seen[f.Text] = true
+			key := normalizeText(f.Text)
+			if !seen[key] {
+				seen[key] = true
 				allFacts = append(allFacts, f)
 			}
 		}
 	}
 
-	log.Printf("Done. %d facts stored.", len(allFacts))
+	log.Printf("Done. %d facts extracted.", len(allFacts))
 	return allFacts, nil
 }
 

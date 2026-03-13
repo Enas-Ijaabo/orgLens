@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/enas/orglens/internal/pipeline"
 	"github.com/google/uuid"
@@ -15,8 +17,9 @@ import (
 const collectionName = "orglens_knowledge"
 
 type Client struct {
-	base       string
-	httpClient *http.Client
+	base         string
+	collectionID string
+	httpClient   *http.Client
 }
 
 func NewClient() *Client {
@@ -27,7 +30,7 @@ func NewClient() *Client {
 	return &Client{base: base, httpClient: &http.Client{}}
 }
 
-// EnsureCollection creates the collection if it does not already exist.
+// EnsureCollection creates the collection if it does not already exist, then fetches its UUID.
 func (c *Client) EnsureCollection(ctx context.Context) error {
 	body, _ := json.Marshal(map[string]any{
 		"name": collectionName,
@@ -37,11 +40,44 @@ func (c *Client) EnsureCollection(ctx context.Context) error {
 		return err
 	}
 	defer resp.Body.Close()
-	// 200 = created, 409 = already exists — both are fine
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusConflict {
+
+	b, _ := io.ReadAll(resp.Body)
+	ok := resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusConflict
+	if !ok && resp.StatusCode == http.StatusInternalServerError {
+		ok = strings.Contains(string(b), "already exists")
+	}
+	if !ok {
 		return fmt.Errorf("ensure collection: unexpected status %d", resp.StatusCode)
 	}
+
+	return c.fetchCollectionID(ctx)
+}
+
+// fetchCollectionID fetches and stores the UUID for the collection.
+func (c *Client) fetchCollectionID(ctx context.Context) error {
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet,
+		c.base+"/api/v1/collections/"+collectionName, nil)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("fetch collection id: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var col struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&col); err != nil {
+		return fmt.Errorf("fetch collection id decode: %w", err)
+	}
+	if col.ID == "" {
+		return fmt.Errorf("fetch collection id: empty id")
+	}
+	c.collectionID = col.ID
 	return nil
+}
+
+func (c *Client) colPath(suffix string) string {
+	return "/api/v1/collections/" + c.collectionID + suffix
 }
 
 // Add stores facts with their embeddings. IDs are generated if empty.
@@ -74,7 +110,7 @@ func (c *Client) Add(ctx context.Context, facts []pipeline.Fact, embeddings [][]
 		"metadatas":  metadatas,
 	})
 
-	resp, err := c.post(ctx, "/api/v1/collections/"+collectionName+"/add", body)
+	resp, err := c.post(ctx, c.colPath("/add"), body)
 	if err != nil {
 		return err
 	}
@@ -93,7 +129,7 @@ func (c *Client) Query(ctx context.Context, embedding []float64, n int) ([]pipel
 		"include":          []string{"documents", "metadatas"},
 	})
 
-	resp, err := c.post(ctx, "/api/v1/collections/"+collectionName+"/query", body)
+	resp, err := c.post(ctx, c.colPath("/query"), body)
 	if err != nil {
 		return nil, err
 	}
@@ -132,7 +168,7 @@ func (c *Client) GetAll(ctx context.Context) ([]pipeline.Fact, error) {
 		"include": []string{"documents", "metadatas"},
 	})
 
-	resp, err := c.post(ctx, "/api/v1/collections/"+collectionName+"/get", body)
+	resp, err := c.post(ctx, c.colPath("/get"), body)
 	if err != nil {
 		return nil, err
 	}
@@ -163,7 +199,9 @@ func (c *Client) GetAll(ctx context.Context) ([]pipeline.Fact, error) {
 
 // Count returns the number of facts stored in the collection.
 func (c *Client) Count(ctx context.Context) (int, error) {
-	resp, err := c.httpClient.Get(c.base + "/api/v1/collections/" + collectionName + "/count")
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet,
+		c.base+c.colPath("/count"), nil)
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return 0, fmt.Errorf("count: %w", err)
 	}
