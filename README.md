@@ -50,7 +50,7 @@ Ingestion starts automatically on startup. The **Ingest** tab shows live per-fil
 
 ```bash
 # 1. Clone
-git clone https://github.com/enas/novalore
+git clone https://github.com/Enas-Ijaabo/novalore
 cd novalore
 
 # 2. Set up credentials
