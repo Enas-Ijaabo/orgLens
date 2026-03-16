@@ -25,7 +25,7 @@ type Client struct {
 	httpClient       *http.Client
 }
 
-// FileMeta holds per-file ingestion state stored in orglens_meta.
+// FileMeta holds per-file ingestion state stored in novalore_meta.
 type FileMeta struct {
 	File       string    `json:"file"`
 	IngestedAt time.Time `json:"ingested_at"`
@@ -237,7 +237,7 @@ func (c *Client) Reset(ctx context.Context) error {
 	return c.EnsureCollection(ctx)
 }
 
-// EnsureMetaCollection creates orglens_meta if it does not exist, then fetches its UUID.
+// EnsureMetaCollection creates novalore_meta if it does not exist, then fetches its UUID.
 func (c *Client) EnsureMetaCollection(ctx context.Context) error {
 	body, _ := json.Marshal(map[string]any{"name": metaCollectionName})
 	resp, err := c.post(ctx, "/api/v1/collections", body)
@@ -274,7 +274,7 @@ func (c *Client) metaColPath(suffix string) string {
 	return "/api/v1/collections/" + c.metaCollectionID + suffix
 }
 
-// WriteFileMeta upserts a per-file ingestion record into orglens_meta.
+// WriteFileMeta upserts a per-file ingestion record into novalore_meta.
 func (c *Client) WriteFileMeta(ctx context.Context, file string, ingestedAt time.Time, factsCount int) error {
 	body, _ := json.Marshal(map[string]any{
 		"ids":        []string{file},
@@ -294,7 +294,7 @@ func (c *Client) WriteFileMeta(ctx context.Context, file string, ingestedAt time
 	return nil
 }
 
-// GetAllMeta returns all per-file ingestion records from orglens_meta.
+// GetAllMeta returns all per-file ingestion records from novalore_meta.
 func (c *Client) GetAllMeta(ctx context.Context) ([]FileMeta, error) {
 	body, _ := json.Marshal(map[string]any{
 		"include": []string{"documents", "metadatas"},
@@ -360,7 +360,7 @@ func (c *Client) DeleteFileMeta(ctx context.Context, file string) error {
 	return nil
 }
 
-// ResetMeta deletes and recreates the orglens_meta collection.
+// ResetMeta deletes and recreates the novalore_meta collection.
 func (c *Client) ResetMeta(ctx context.Context) error {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodDelete,
 		c.base+"/api/v1/collections/"+metaCollectionName, nil)
